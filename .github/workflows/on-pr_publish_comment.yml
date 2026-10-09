@@ -8,12 +8,20 @@ on:
 
 jobs:
   compare_configuration:
+    # Runs with a write-scoped token on behalf of a (possibly fork) PR run, so
+    # only consume runs that finished successfully and treat everything they
+    # uploaded as untrusted data.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
     uses: ./.github/workflows/compare_config.yml
     with:
       current_run_id: ${{github.event.workflow_run.id}}
       base_commit_sha: ${{github.event.workflow_run.event.pull_request.base.sha}}
 
   check_memory_requirement_doc:
+    # Runs with a write-scoped token on behalf of a (possibly fork) PR run, so
+    # only consume runs that finished successfully and treat everything they
+    # uploaded as untrusted data.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
     # Warns on the PR when doc/includes/memory_requirement.txt no longer
     # matches the PR's own sample builds. Reuses the Twister artifacts the
     # sample build matrix already produced, instead of building again -
@@ -32,31 +40,46 @@ jobs:
           path: sidewalk
 
       - name: Get PR number
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
         with:
           run_id: ${{github.event.workflow_run.id}}
           name: PR_number
-          path: PR_number
+          path: pr-artifacts/PR_number
 
       - name: Unpack PR number
         id: get-pr-number
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          pr_number="$(cat PR_number/PR_number)"
+          pr_number="$(head -n 1 pr-artifacts/PR_number/PR_number)"
+          # The artifact is fork-controlled: accept digits only and make sure
+          # that PR really is the one this run was built from.
+          if ! [[ "$pr_number" =~ ^[0-9]{1,9}$ ]]; then
+            echo "Invalid PR number in artifact"
+            exit 1
+          fi
+          pr_head_sha="$(gh api "repos/${{ github.repository }}/pulls/$pr_number" --jq .head.sha)"
+          if [ "$pr_head_sha" != "$HEAD_SHA" ]; then
+            echo "PR #$pr_number does not match the commit this run was built from"
+            exit 1
+          fi
           echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
 
       - name: Get PR sample metadata artifacts
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
         with:
           run_id: ${{github.event.workflow_run.id}}
           name: sample-artifacts-meta
-          path: .
+          path: pr-artifacts
 
       - name: Get PR sample build artifacts
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
         with:
           run_id: ${{github.event.workflow_run.id}}
-          name: sample-artifacts-build
-          path: .
+          name: sample-artifacts
+          path: pr-artifacts
+          if_no_artifact_found: ignore
 
       - name: Fetch zephyr sources
         # Only the Twister size calculator (zephyr/scripts/pylib/twister) is
@@ -75,7 +98,7 @@ jobs:
       - name: Check doc/includes/memory_requirement.txt freshness
         id: check
         run: |
-          if [ ! -d twister-out ]; then
+          if [ ! -d pr-artifacts/twister-out ]; then
             echo "No reusable Twister artifacts (samples build likely skipped or"
             echo "save_images=false), skipping the freshness check."
             echo "stale=false" >> $GITHUB_OUTPUT
@@ -83,7 +106,7 @@ jobs:
           fi
 
           if ! python3 sidewalk/scripts/ci/generate_memory_requirement.py \
-              --outdir twister-out --no-build --dry-run > generated.txt 2> generate.log; then
+              --outdir "$PWD/pr-artifacts/twister-out" --no-build --dry-run > generated.txt 2> generate.log; then
             echo "Could not regenerate the memory requirement doc from this PR's"
             echo "build artifacts, skipping the freshness check:"
             cat generate.log
@@ -126,6 +149,10 @@ jobs:
             This is a warning only - it does not fail the build.
 
   create_PR_comment:
+    # Runs with a write-scoped token on behalf of a (possibly fork) PR run, so
+    # only consume runs that finished successfully and treat everything they
+    # uploaded as untrusted data.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
     needs: [compare_configuration]
     runs-on: ubuntu-24.04
     permissions:
@@ -140,21 +167,21 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Get artifacts from PR
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
         with:
           run_id: ${{github.event.workflow_run.id}}
           name: sample-artifacts-meta
           path: current
 
       - name: Get PR number
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
         with:
           run_id: ${{github.event.workflow_run.id}}
           name: PR_number
           path: current/PR_number
 
       - name: Get artifacts from PR base
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
         with:
           commit: ${{github.event.workflow_run.event.pull_request.base.sha}}
           workflow: on-commit.yml
@@ -166,8 +193,22 @@ jobs:
 
       - name: Unpack PR number
         id: get-pr-number
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          pr_number="$(cat current/PR_number/PR_number)"
+          pr_number="$(head -n 1 current/PR_number/PR_number)"
+          # The artifact is fork-controlled: accept digits only and make sure
+          # that PR really is the one this run was built from.
+          if ! [[ "$pr_number" =~ ^[0-9]{1,9}$ ]]; then
+            echo "Invalid PR number in artifact"
+            exit 1
+          fi
+          pr_head_sha="$(gh api "repos/${{ github.repository }}/pulls/$pr_number" --jq .head.sha)"
+          if [ "$pr_head_sha" != "$HEAD_SHA" ]; then
+            echo "PR #$pr_number does not match the commit this run was built from"
+            exit 1
+          fi
           echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
 
       - name: Generage memory diff
